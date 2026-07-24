@@ -51,6 +51,7 @@ import org.nitri.opentopo.nearby.NearbyFragment
 import org.nitri.opentopo.nearby.entity.NearbyItem
 import org.nitri.opentopo.util.Utils
 import org.nitri.opentopo.viewmodel.GpxViewModel
+import org.nitri.opentopo.viewmodel.GpxViewModel.GpxDisplayState
 import org.nitri.opentopo.viewmodel.KmlViewModel
 import org.nitri.ors.Ors
 import org.nitri.ors.OrsClient
@@ -383,8 +384,7 @@ open class BaseMainActivity : AppCompatActivity(), MapFragment.OnFragmentInterac
     override fun setGpx() {
         val currentGpx = gpxViewModel.gpx
         if (currentGpx != null) {
-            val displayState = if (gpxViewModel.gpxUriString == null) MapFragment.GpxDisplayState.CALCULATED else MapFragment.GpxDisplayState.LOADED_FROM_FILE
-            handleParsedGpx(currentGpx, displayState, gpxViewModel.gpxUriString)
+            handleParsedGpx(currentGpx, gpxViewModel.displayState, gpxViewModel.gpxUriString)
         } else {
             gpxViewModel.gpxUriString?.takeIf { it.isNotEmpty() }?.let { uriString ->
                 parseGpx(uriString.toUri())
@@ -441,7 +441,7 @@ open class BaseMainActivity : AppCompatActivity(), MapFragment.OnFragmentInterac
                     withContext(Dispatchers.Main) {
                         handleParsedGpx(
                             gpx,
-                            MapFragment.GpxDisplayState.LOADED_FROM_FILE,
+                            GpxDisplayState.LOADED_FROM_FILE,
                             uri.toString()
                         )
                     }
@@ -549,7 +549,7 @@ open class BaseMainActivity : AppCompatActivity(), MapFragment.OnFragmentInterac
                 val gpx = GPXParser().parse(inputStream)
                 val convertedGpx = gpx?.let { Utils.convertRouteToTrack(it) }
                 withContext(Dispatchers.Main) {
-                    handleParsedGpx(convertedGpx, MapFragment.GpxDisplayState.CALCULATED, null)
+                    handleParsedGpx(convertedGpx, GpxDisplayState.CALCULATED, null)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -562,16 +562,19 @@ open class BaseMainActivity : AppCompatActivity(), MapFragment.OnFragmentInterac
 
     private fun handleParsedGpx(
         parsedGpx: Gpx?,
-        displayState: MapFragment.GpxDisplayState,
+        displayState: GpxDisplayState,
         gpxUriString: String?
     ) {
         parsedGpx?.let { validGpx ->
             gpxViewModel.gpx = validGpx
+            gpxViewModel.displayState = displayState
             (supportFragmentManager.findFragmentByTag(MAP_FRAGMENT_TAG) as? MapFragment)?.setGpx(validGpx, displayState, shouldZoomToGpx)
             gpxViewModel.gpxUriString = gpxUriString
 
-            // Track GPX loaded event only for files (Play flavor provides the reporting implementation)
-            if (displayState == MapFragment.GpxDisplayState.LOADED_FROM_FILE) {
+            // Clear calculated route parameters if we are loading from file
+            if (displayState == GpxDisplayState.LOADED_FROM_FILE) {
+                gpxViewModel.markerCoordinates = null
+                gpxViewModel.orsProfile = null
                 val fileName = try {
                     gpxUriString?.toUri()?.lastPathSegment
                 } catch (e: Exception) { null }
@@ -619,6 +622,9 @@ open class BaseMainActivity : AppCompatActivity(), MapFragment.OnFragmentInterac
     override fun clearGpx() {
         gpxViewModel.gpx = null
         gpxViewModel.gpxUriString = null
+        gpxViewModel.markerCoordinates = null
+        gpxViewModel.orsProfile = null
+        gpxViewModel.displayState = GpxDisplayState.IDLE
     }
 
     override fun clearKml() {

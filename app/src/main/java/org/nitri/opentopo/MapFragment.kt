@@ -58,6 +58,8 @@ import org.nitri.opentopo.util.OrientationSensor
 import org.nitri.opentopo.util.Utils
 import org.nitri.opentopo.view.AboutDialog
 import org.nitri.opentopo.view.MarkerEditorDialog
+import org.nitri.opentopo.viewmodel.GpxViewModel
+import org.nitri.opentopo.viewmodel.GpxViewModel.GpxDisplayState
 import org.nitri.opentopo.viewmodel.LocationViewModel
 import org.nitri.opentopo.viewmodel.MarkerViewModel
 import org.nitri.ors.OrsClient
@@ -88,17 +90,12 @@ import kotlin.math.min
 class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListener,
     GestureCallback, ClickableCompassOverlay.OnCompassClickListener {
 
-    /**
-     * Enum representing the possible states of the map display regarding GPX tracks
-     */
-    enum class GpxDisplayState {
-        IDLE,           // Nothing on display
-        LOADED_FROM_FILE, // GPX loaded from file
-        CALCULATED      // GPX calculated from routing service
-    }
     private var kmlDocument: KmlDocument? = null
 
-    private var gpxDisplayState: GpxDisplayState = GpxDisplayState.IDLE
+    private var gpxDisplayState: GpxDisplayState
+        get() = gpxViewModel?.displayState ?: GpxDisplayState.IDLE
+        set(value) { gpxViewModel?.displayState = value }
+
     private var orientationSensor: OrientationSensor? = null
     @Volatile
     private var mapRotation: Boolean = false
@@ -164,6 +161,7 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
     private var maxZoomLevel = DEFAULT_MAX_ZOOM
     private var lastNearbyAnimateToId = 0
     private var locationViewModel: LocationViewModel? = null
+    private var gpxViewModel: GpxViewModel? = null
     private var gestureOverlay: GestureOverlay? = null
 
     private var mapViewInitialized = false
@@ -231,6 +229,7 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
         locationManager =
             hostActivity.getSystemService(Context.LOCATION_SERVICE) as LocationManager
         locationViewModel = ViewModelProvider(hostActivity)[LocationViewModel::class.java]
+        gpxViewModel = ViewModelProvider(hostActivity)[GpxViewModel::class.java]
         val nmeaListener = OnNmeaMessageListener { s: String?, _: Long ->
             locationViewModel?.currentNmea?.value = s
 
@@ -367,11 +366,6 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
         listener?.setGpx()
         listener?.setKml()
 
-        // Check if there's already a GPX track loaded and update the state accordingly
-        if (overlayHelper?.hasGpx() == true) {
-            gpxDisplayState = GpxDisplayState.LOADED_FROM_FILE
-        }
-
         val arguments = arguments
         var mapCenterSet = false
         // Move to received geo intent coordinates
@@ -391,11 +385,13 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
             hostActivity?.checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (hasFineLocationPermission || hasCoarseLocationPermission) {
             locationViewModel?.let { viewModel ->
-                val lastKnownLocation =
-                    locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                        ?: locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                        ?: locationManager?.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)
-                viewModel.currentLocation.value = lastKnownLocation
+                if (viewModel.currentLocation.value == null) {
+                    val lastKnownLocation =
+                        locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                            ?: locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                            ?: locationManager?.getLastKnownLocation(LocationManager.PASSIVE_PROVIDER)
+                    viewModel.currentLocation.value = lastKnownLocation
+                }
             }
         }
         savedInstanceState?.let {
@@ -480,22 +476,38 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
     }
 
     private fun calculateRoute() {
-        val coordinates = mutableListOf<List<Double>>()
-        val currentLocation = locationViewModel?.currentLocation?.value
-        currentLocation?.let {
-            coordinates.add(listOf(it.longitude, it.latitude))
+        val markers = mutableListOf<List<Double>>()
+        markerViewModel.markers.value?.forEach { marker ->
+            if (marker.routeWaypoint) {
+                markers.add(listOf(marker.longitude, marker.latitude))
+            }
         }
-        if (coordinates.isEmpty()) {
+
+        if (markers.isEmpty()) {
             if (gpxDisplayState == GpxDisplayState.CALCULATED) {
                 listener?.clearGpx()
             }
             return
         }
-        markerViewModel.markers.value?.forEach { marker ->
-            if (marker.routeWaypoint) {
-                coordinates.add(listOf(marker.longitude, marker.latitude))
-            }
+
+        val profile = sharedPreferences.getString(PREF_ORS_PROFILE, "driving-car") ?: "driving-car"
+
+        // Skip if the markers and profile are same as before (current location doesn't trigger recalculation)
+        if (gpxDisplayState == GpxDisplayState.CALCULATED &&
+            markers == gpxViewModel?.markerCoordinates &&
+            profile == gpxViewModel?.orsProfile
+        ) {
+            Log.d(TAG, "Route markers and profile unchanged. Skipping.")
+            return
         }
+
+        val coordinates = mutableListOf<List<Double>>()
+        val currentLocation = locationViewModel?.currentLocation?.value
+        currentLocation?.let {
+            coordinates.add(listOf(it.longitude, it.latitude))
+        }
+        coordinates.addAll(markers)
+
         if (coordinates.size < 2) {
             // Insufficient coordinates; nothing to do
             if (gpxDisplayState != GpxDisplayState.LOADED_FROM_FILE) {
@@ -507,42 +519,40 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
         val locale = Resources.getSystem().configuration.locales.get(0)
         val language = locale.language.lowercase()
         listener?.getOpenRouteServiceClient()?.let { client ->
-            val profile = sharedPreferences.getString(PREF_ORS_PROFILE, "driving-car")
-            profile?.let {
-                val directions = Directions(client, it)
-                directions.getRouteGpx(coordinates, language, object : Directions.RouteGpxResult {
-                    override fun onSuccess(gpx: String) {
-                        Log.d(TAG, "GPX: $gpx")
-                        // Analytics: route calculation succeeded (Play flavor reports it; FOSS no-ops)
-                        AnalyticsProvider.get(requireContext()).trackRouteCalculated(
-                            profile = it,
-                            waypointCount = coordinates.size
-                        )
-                        if (gpxDisplayState == GpxDisplayState.LOADED_FROM_FILE) {
-                            showGpxDialog {
-                                listener?.clearGpx()
-                                listener?.parseCalculatedGpx(gpx)
-                            }
-                        } else {
-                            removeGpx()
-                            listener?.clearGpx()
+            val directions = Directions(client, profile)
+            directions.getRouteGpx(coordinates, language, object : Directions.RouteGpxResult {
+                override fun onSuccess(gpx: String) {
+                    Log.d(TAG, "GPX: $gpx")
+                    // Analytics: route calculation succeeded (Play flavor reports it; FOSS no-ops)
+                    AnalyticsProvider.get(requireContext()).trackRouteCalculated(
+                        profile = profile,
+                        waypointCount = coordinates.size
+                    )
+                    gpxViewModel?.markerCoordinates = markers
+                    gpxViewModel?.orsProfile = profile
+
+                    if (gpxDisplayState == GpxDisplayState.LOADED_FROM_FILE) {
+                        showGpxDialog {
                             listener?.parseCalculatedGpx(gpx)
                         }
-                    }
-
-                    override fun onError(message: String) {
-                        Log.e(TAG, "Error fetching GPX: $message")
-                        context?.let { ctx ->
-                            Toast.makeText(
-                                ctx,
-                                "Error fetching GPX: $message",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        }
+                    } else {
+                        removeGpx()
+                        listener?.parseCalculatedGpx(gpx)
                     }
                 }
-                )
+
+                override fun onError(message: String) {
+                    Log.e(TAG, "Error fetching GPX: $message")
+                    context?.let { ctx ->
+                        Toast.makeText(
+                            ctx,
+                            "Error fetching GPX: $message",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
             }
+            )
         }
     }
 
@@ -1251,7 +1261,6 @@ class MapFragment : Fragment(), LocationListener, PopupMenu.OnMenuItemClickListe
 
     override fun onDestroy() {
         super.onDestroy()
-        gpxDisplayState = GpxDisplayState.IDLE
         locationManager = null
         locationOverlay = null
         compassOverlay = null
