@@ -1,6 +1,7 @@
 package org.nitri.opentopo
 
 import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
@@ -16,6 +17,7 @@ import com.google.firebase.crashlytics.FirebaseCrashlytics
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : BaseMainActivity() {
@@ -176,7 +178,33 @@ class MainActivity : BaseMainActivity() {
             packageManager.getInstallerPackageName(packageName)
         }
 
+        val signerSha256 = runCatching {
+            val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val packageInfo = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+                val signingInfo = packageInfo.signingInfo
+                if (signingInfo != null) {
+                    if (signingInfo.hasMultipleSigners()) {
+                        signingInfo.apkContentsSigners
+                    } else {
+                        signingInfo.signingCertificateHistory
+                    }
+                } else null
+            } else {
+                @Suppress("DEPRECATION")
+                val packageInfo = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
+                @Suppress("DEPRECATION")
+                packageInfo.signatures
+            }
+
+            signatures?.firstOrNull()?.let { signature ->
+                val md = MessageDigest.getInstance("SHA-256")
+                val digest = md.digest(signature.toByteArray())
+                digest.joinToString("") { "%02X".format(it) }
+            }
+        }.getOrNull()
+
         crashlytics.setCustomKey("installer_package", installer ?: "unknown")
+        crashlytics.setCustomKey("signer_sha256", signerSha256 ?: "unknown")
         crashlytics.setCustomKey("build_fingerprint", Build.FINGERPRINT)
         crashlytics.setCustomKey("build_incremental", Build.VERSION.INCREMENTAL)
         crashlytics.setCustomKey("security_patch", Build.VERSION.SECURITY_PATCH)
