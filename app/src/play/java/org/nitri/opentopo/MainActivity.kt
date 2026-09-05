@@ -180,20 +180,16 @@ class MainActivity : BaseMainActivity() {
 
         val signerSha256 = runCatching {
             val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                val packageInfo = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNING_CERTIFICATES)
-                val signingInfo = packageInfo.signingInfo
-                if (signingInfo != null) {
-                    if (signingInfo.hasMultipleSigners()) {
-                        signingInfo.apkContentsSigners
-                    } else {
-                        signingInfo.signingCertificateHistory
-                    }
-                } else null
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.GET_SIGNING_CERTIFICATES
+                ).signingInfo?.apkContentsSigners
             } else {
                 @Suppress("DEPRECATION")
-                val packageInfo = packageManager.getPackageInfo(packageName, PackageManager.GET_SIGNATURES)
-                @Suppress("DEPRECATION")
-                packageInfo.signatures
+                packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.GET_SIGNATURES
+                ).signatures
             }
 
             signatures?.firstOrNull()?.let { signature ->
